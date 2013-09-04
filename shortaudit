@@ -1,0 +1,238 @@
+#!/usr/bin/env python
+# coding: utf-8
+"""Check that files in /short follow the current permissions policy"""
+
+import argparse
+from collections import defaultdict
+import errno
+import grp
+import os
+import pwd
+import stat
+import sys
+
+shortpath = '/short'
+script = 'shortaudit'
+
+#---
+def shortaudit(projects_cmd=None, usernames_cmd=None, verbose=False,
+               autofix=False):
+
+    # Set default arguments
+    if not projects_cmd:
+        projects_cmd = os.environ['PROJECT']
+    projects = projects_cmd.split(',')
+
+    if not usernames_cmd:
+        usernames_cmd = pwd.getpwuid(os.getuid()).pw_name
+    usernames = usernames_cmd.split(',')
+
+    # Validate users and projects, and get OS metadata
+    try:
+        groups = {p: grp.getgrnam(p) for p in projects}
+    except KeyError as ec:
+        print('{}: {}'.format(script, ec.message))
+        sys.exit(1)
+
+    try:
+        users = [pwd.getpwnam(u) for u in usernames]
+    except KeyError as ec:
+        print('{}: {}'.format(script, ec.message))
+        sys.exit(1)
+
+    # Initialize disk usage logs
+    user_disk_usage = defaultdict(int)
+    group_disk_usage = defaultdict(int)
+    hardlink_inodes = defaultdict(int)
+
+    # TODO: Test for directories!
+    for proj in projects:
+
+        projectpath = os.path.join(shortpath, proj)
+
+        for user in usernames:
+
+            userpath = os.path.join(projectpath, user)
+
+            audit_log = defaultdict(list)
+
+            # TODO: Why is os.walk so slow?
+            for root, dirs, files in os.walk(userpath):
+
+                # Audit the directories
+                for d in dirs:
+                    d_path = os.path.join(root, d)
+                    d_stat = os.lstat(d_path)
+
+                    # Audit disk usage
+
+                    d_uid = d_stat.st_uid
+                    d_user = pwd.getpwuid(d_uid).pw_name
+                    user_disk_usage[d_user] += d_stat.st_blocks
+
+                    d_gid = d_stat.st_gid
+                    d_group = grp.getgrgid(d_gid).gr_name
+                    group_disk_usage[d_group] += d_stat.st_blocks
+
+                    # Audit permissions
+
+                    d_mode = d_stat.st_mode
+                    new_mode = d_mode
+
+                    # Audit setgid permissions
+                    # TODO: I guess I could consolidate these
+                    if not d_mode & stat.S_ISGID:
+                        mesg = 'enable setgid (g+s)'
+                        audit_log[d_path].append(mesg)
+
+                        new_mode = new_mode | stat.S_ISGID
+
+                        if verbose:
+                            print('{}: {}: {}'.format(script, d_path, mesg))
+
+                    # Audit group access
+                    if not d_mode & (stat.S_IRGRP | stat.S_IRGRP):
+                        mesg = 'enable group access (g+rx)'
+                        audit_log[d_path].append(mesg)
+
+                        new_mode = new_mode | (stat.S_IRGRP | stat.S_IRGRP)
+
+                        if verbose:
+                            print('{}: {}: {}'.format(script, d_path, mesg))
+
+                    # Audit public access
+                    if d_mode & stat.S_IWOTH:
+                        mesg = 'disable public write access (o-w)'
+                        audit_log[d_path].append(mesg)
+
+                        new_mode = new_mode & ~stat.S_IWOTH
+
+                        if verbose:
+                            print('{}: {}: {}'.format(script, d_path, mesg))
+
+                    if autofix and new_mode != d_mode:
+                        os.chmod(d_path, new_mode)
+
+                    # Check permission group
+                    d_gid = d_stat.st_gid
+                    if not d_gid == groups[proj].gr_gid:
+                        mesg = 'change group to {}'.format(proj)
+                        audit_log[d_path].append(mesg)
+                        if verbose:
+                            print('{}: {}: {}'.format(script, d_path, mesg))
+
+                        if autofix:
+                            os.chown(f_path, groups[proj].gr_gid)
+
+                # Audit the files
+                for f in files:
+                    f_path = os.path.join(root, f)
+                    f_stat = os.lstat(f_path)
+
+                    # TODO: Broken link check?
+
+                    # Get file disk usage
+                    if not f_stat.st_ino in hardlink_inodes:
+                        f_uid = f_stat.st_uid
+                        f_user = pwd.getpwuid(f_uid).pw_name
+                        user_disk_usage[f_user] += f_stat.st_blocks
+
+                        f_gid = f_stat.st_gid
+                        f_group = grp.getgrgid(f_gid).gr_name
+                        group_disk_usage[f_group] += f_stat.st_blocks
+
+                        if f_stat.st_nlink > 1:
+                            hardlink_inodes.add(f_stat.st_ino)
+
+                    # Audit permissions
+
+                    f_mode = f_stat.st_mode
+                    if not stat.S_ISLNK(f_mode):
+                    
+                        new_mode = f_mode
+
+                        # Audit group access
+                        if not f_mode & (stat.S_IRGRP | stat.S_IRGRP):
+                            mesg = 'enable group access (g+r)'
+                            audit_log[f_path].append(mesg)
+
+                            new_mode = new_mode | (stat.S_IRGRP | stat.S_IRGRP)
+
+                            if verbose:
+                                print('{}: {}: {}'.format(script, f_path, mesg))
+
+                        # Audit public access
+                        if f_mode & stat.S_IWOTH:
+                            mesg = 'disable public write access (o-w)'
+                            audit_log[f_path].append(mesg)
+
+                            new_mode = new_mode & ~stat.S_IWOTH
+
+                            if verbose:
+                                print('{}: {}: {}'.format(script, f_path, mesg))
+
+                        if autofix and new_mode != f_mode:
+                            os.chmod(f_path, new_mode)
+
+                    # Check file group
+                    f_gid = f_stat.st_gid
+                    if not f_gid == groups[proj].gr_gid:
+                        mesg = 'change group to {}'.format(proj)
+                        audit_log[f_path].append(mesg)
+                        if verbose:
+                            print('{}: {}: {}'.format(script, f_path, mesg))
+
+                        if autofix:
+                            os.chown(f_path, groups[proj].gr_gid)
+
+
+            # For completeness, append the directory disk usage
+            base_stat = os.lstat(userpath)
+            user_disk_usage[user] += base_stat.st_blocks
+
+    # Debug
+    for user in user_disk_usage:
+        user_disk_usage[user] = user_disk_usage[user] * 512
+    print(user_disk_usage)
+
+
+#---
+def shortaudit_parse():
+
+    parser = argparse.ArgumentParser(description=__doc__)
+
+    parser.add_argument('-P', '--project',
+                        action='store',
+                        dest='project_list',
+                        default=None,
+                        help='Project to audit')
+
+    parser.add_argument('-u', '--users',
+                        action='store',
+                        dest='user_list',
+                        default=None,
+                        help='Users to audit (comma-separated)')
+
+    parser.add_argument('-f', '--fix',
+                        action='store_true',
+                        dest='autofix',
+                        help='Automatically fix any permission issues')
+
+    parser.add_argument('-v', '--verbose',
+                        action='store_true',
+                        dest='verbose',
+                        help='Print all necessary file modifications')
+
+    args = parser.parse_args()
+
+    return args.project_list, args.user_list, args.verbose
+
+
+#---
+if __name__ == '__main__':
+
+    # Parse input
+    projects, users, verbose = shortaudit_parse()
+
+    # Prompt for group
+    shortaudit(projects, users, verbose)
