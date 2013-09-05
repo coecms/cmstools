@@ -14,12 +14,15 @@ import pwd
 import stat
 import sys
 
+import yaml
+
 shortpath = '/short'
-script = 'shortaudit'
+scriptname = 'shortaudit'
 
 #---
-def shortaudit(projects_cmd=None, usernames_cmd=None, verbose=False,
-               autofix=False):
+# TODO: Break this up into smaller functions
+def shortaudit(projects_cmd=None, usernames_cmd=None, autofix=False,
+               logging=False):
 
     # Set default arguments
     if not projects_cmd:
@@ -30,23 +33,27 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, verbose=False,
         usernames_cmd = pwd.getpwuid(os.getuid()).pw_name
     usernames = usernames_cmd.split(',')
 
+    # Verbose output if no logging
+    verbose = not logging
+
     # Validate users and projects, and get OS metadata
     try:
         groups = {p: grp.getgrnam(p) for p in projects}
     except KeyError as ec:
-        print('{}: {}'.format(script, ec.message))
+        report(ec.message)
         sys.exit(1)
 
     try:
-        users = [pwd.getpwnam(u) for u in usernames]
+        # NOTE: I don't ever use this
+        users = {u: pwd.getpwnam(u) for u in usernames}
     except KeyError as ec:
-        print('{}: {}'.format(script, ec.message))
+        report(ec.message)
         sys.exit(1)
 
     # Initialize disk usage logs
     user_disk_usage = defaultdict(int)
     group_disk_usage = defaultdict(int)
-    hardlink_inodes = defaultdict(int)
+    hardlink_inodes = set()
 
     # TODO: Test for directories!
     for proj in projects:
@@ -77,10 +84,24 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, verbose=False,
                     d_group = grp.getgrgid(d_gid).gr_name
                     group_disk_usage[d_group] += d_stat.st_blocks
 
+                    # Check permission group
+                    # NOTE: This will disable the setgid bit
+                    d_gid = d_stat.st_gid
+                    if not d_gid == groups[proj].gr_gid:
+                        mesg = 'change group to {}'.format(proj)
+                        audit_log[d_path].append(mesg)
+
+                        if verbose:
+                            report('{}: {}'.format(d_path, mesg))
+
+                        if autofix:
+                            os.lchown(f_path, -1, groups[proj].gr_gid)
+
                     # Audit permissions
 
                     d_mode = d_stat.st_mode
                     new_mode = d_mode
+                    dat_flag = False
 
                     # Audit setgid permissions
                     # TODO: I guess I could consolidate these
@@ -89,9 +110,10 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, verbose=False,
                         audit_log[d_path].append(mesg)
 
                         new_mode = new_mode | stat.S_ISGID
+                        dat_flag = True
 
                         if verbose:
-                            print('{}: {}: {}'.format(script, d_path, mesg))
+                            report('{}: {}'.format(d_path, mesg))
 
                     # Audit group access
                     if not d_mode & (stat.S_IRGRP | stat.S_IRGRP):
@@ -101,7 +123,7 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, verbose=False,
                         new_mode = new_mode | (stat.S_IRGRP | stat.S_IRGRP)
 
                         if verbose:
-                            print('{}: {}: {}'.format(script, d_path, mesg))
+                            report('{}: {}'.format(d_path, mesg))
 
                     # Audit public access
                     if d_mode & stat.S_IWOTH:
@@ -111,28 +133,16 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, verbose=False,
                         new_mode = new_mode & ~stat.S_IWOTH
 
                         if verbose:
-                            print('{}: {}: {}'.format(script, d_path, mesg))
+                            report('{}: {}'.format(d_path, mesg))
 
                     if autofix and new_mode != d_mode:
                         os.chmod(d_path, new_mode)
 
-                    # Check permission group
-                    d_gid = d_stat.st_gid
-                    if not d_gid == groups[proj].gr_gid:
-                        mesg = 'change group to {}'.format(proj)
-                        audit_log[d_path].append(mesg)
-                        if verbose:
-                            print('{}: {}: {}'.format(script, d_path, mesg))
-
-                        if autofix:
-                            os.chown(f_path, groups[proj].gr_gid)
 
                 # Audit the files
                 for f in files:
                     f_path = os.path.join(root, f)
                     f_stat = os.lstat(f_path)
-
-                    # TODO: Broken link check?
 
                     # Get file disk usage
                     if not f_stat.st_ino in hardlink_inodes:
@@ -147,11 +157,22 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, verbose=False,
                         if f_stat.st_nlink > 1:
                             hardlink_inodes.add(f_stat.st_ino)
 
+                    # Check file group
+                    f_gid = f_stat.st_gid
+                    if not f_gid == groups[proj].gr_gid:
+                        mesg = 'change group to {}'.format(proj)
+                        audit_log[f_path].append(mesg)
+                        if verbose:
+                            report('{}: {}'.format(f_path, mesg))
+
+                        if autofix:
+                            os.lchown(f_path, -1, groups[proj].gr_gid)
+
                     # Audit permissions
 
                     f_mode = f_stat.st_mode
                     if not stat.S_ISLNK(f_mode):
-                    
+
                         new_mode = f_mode
 
                         # Audit group access
@@ -162,7 +183,7 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, verbose=False,
                             new_mode = new_mode | (stat.S_IRGRP | stat.S_IRGRP)
 
                             if verbose:
-                                print('{}: {}: {}'.format(script, f_path, mesg))
+                                report('{}: {}'.format(f_path, mesg))
 
                         # Audit public access
                         if f_mode & stat.S_IWOTH:
@@ -172,31 +193,28 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, verbose=False,
                             new_mode = new_mode & ~stat.S_IWOTH
 
                             if verbose:
-                                print('{}: {}: {}'.format(script, f_path, mesg))
+                                report('{}: {}'.format(f_path, mesg))
 
                         if autofix and new_mode != f_mode:
                             os.chmod(f_path, new_mode)
-
-                    # Check file group
-                    f_gid = f_stat.st_gid
-                    if not f_gid == groups[proj].gr_gid:
-                        mesg = 'change group to {}'.format(proj)
-                        audit_log[f_path].append(mesg)
-                        if verbose:
-                            print('{}: {}: {}'.format(script, f_path, mesg))
-
-                        if autofix:
-                            os.chown(f_path, groups[proj].gr_gid)
-
 
             # For completeness, append the directory disk usage
             base_stat = os.lstat(userpath)
             user_disk_usage[user] += base_stat.st_blocks
 
-    # Debug
-    for user in user_disk_usage:
-        user_disk_usage[user] = user_disk_usage[user] * 512
-    print(user_disk_usage)
+            # An empty log means no problems were detected
+            if not audit_log:
+                report('{} passed the audit'.format(userpath))
+            else:
+                if logging:
+                    with open('short_{}.log'.format(user), 'w') as out:
+                        out = yaml.dump(dict(audit_log), out,
+                                        default_flow_style=False)
+
+
+#---
+def report(mesg):
+    return '{}: {}'.format(scriptname, mesg)
 
 
 #---
@@ -206,13 +224,13 @@ def shortaudit_parse():
 
     parser.add_argument('-P', '--project',
                         action='store',
-                        dest='project_list',
+                        dest='projects',
                         default=None,
                         help='Project to audit')
 
     parser.add_argument('-u', '--users',
                         action='store',
-                        dest='user_list',
+                        dest='users',
                         default=None,
                         help='Users to audit (comma-separated)')
 
@@ -221,21 +239,21 @@ def shortaudit_parse():
                         dest='autofix',
                         help='Automatically fix any permission issues')
 
-    parser.add_argument('-v', '--verbose',
+    parser.add_argument('-l', '--log',
                         action='store_true',
-                        dest='verbose',
-                        help='Print all necessary file modifications')
+                        dest='logging',
+                        help='Output permission issues to a log file')
 
     args = parser.parse_args()
 
-    return args.project_list, args.user_list, args.verbose
+    return args.projects, args.users, args.autofix, args.logging
 
 
 #---
 if __name__ == '__main__':
 
     # Parse input
-    projects, users, verbose = shortaudit_parse()
+    args = shortaudit_parse()
 
     # Prompt for group
-    shortaudit(projects, users, verbose)
+    shortaudit(*args)
