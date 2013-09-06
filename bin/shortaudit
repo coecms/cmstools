@@ -5,6 +5,7 @@ Check that files in /short follow the current permissions policy
 Contact: Marshall Ward <marshall.ward@gmail.com>
 """
 
+# Standard Library
 import argparse
 from collections import defaultdict
 import errno
@@ -14,6 +15,7 @@ import pwd
 import stat
 import sys
 
+# Extensions
 import yaml
 
 shortpath = '/short'
@@ -95,7 +97,7 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, autofix=False,
                             report('{}: {}'.format(d_path, mesg))
 
                         if autofix:
-                            os.lchown(f_path, -1, groups[proj].gr_gid)
+                            os.lchown(d_path, -1, groups[proj].gr_gid)
 
                     # Audit permissions
 
@@ -214,7 +216,7 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, autofix=False,
 
 #---
 def report(mesg):
-    return '{}: {}'.format(scriptname, mesg)
+    print('{}: {}'.format(scriptname, mesg))
 
 
 #---
