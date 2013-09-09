@@ -27,15 +27,15 @@ group_disk_usage = defaultdict(int)
 hardlink_inodes = set()
 
 # Permission policy
-# Format: (Enable/Disable bit, Flag Mask, Log Message)
-f_policy = [(True, stat.S_IRGRP | stat.S_IRGRP, 'enable group access (g+rx)'),
+# Format: (Enable/Disable flag, Permission flag mask, Log message)
+f_policy = [(True, stat.S_IRGRP, 'enable group read access (g+r)'),
             (False, stat.S_IWOTH, 'disable public write access (o-w)')]
 
-d_policy = f_policy + [(True, stat.S_ISGID, 'enable setgid (g+s)')]
+d_policy = f_policy + [(True, stat.S_ISGID, 'enable setgid (g+s)'),
+                       (True, stat.S_IXGRP, 'enable group execution (g+x)')]
 
 
 #---
-# TODO: Break this up into smaller functions
 def shortaudit(projects_cmd=None, usernames_cmd=None, autofix=False,
                logging=False):
 
@@ -124,7 +124,7 @@ def file_audit(f_path, f_proj, f_policy, verbose, autofix):
         f_group = grp.getgrgid(f_gid).gr_name
         group_disk_usage[f_group] += f_stat.st_blocks
 
-        # TODO: Maybe always check this, in case directories are checked twice
+        # TODO: Maybe always check this, in case a file is checked twice
         if f_stat.st_nlink > 1:
             hardlink_inodes.add(f_stat.st_ino)
 
