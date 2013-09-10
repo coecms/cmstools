@@ -51,19 +51,6 @@ def shortaudit(projects_cmd=None, usernames_cmd=None, autofix=False,
     # Verbose output if no logging
     verbose = not logging
 
-    # Validate users and projects, and get OS metadata
-    try:
-        groups = {p: grp.getgrnam(p) for p in projects}
-    except KeyError as ec:
-        report(ec.message)
-        sys.exit(1)
-
-    try:
-        users = {u: pwd.getpwnam(u) for u in usernames}
-    except KeyError as ec:
-        report(ec.message)
-        sys.exit(1)
-
     for proj in projects:
         projectpath = os.path.join(shortpath, proj)
 
