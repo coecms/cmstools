@@ -1,44 +1,39 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# NOTE: Time comparisons with qstat
-# NOTE: Wrong numbers, check user+sys
+"""gfdstat: nqstat replacement for GFD and CoE Oceans group
+Contact: Marshall Ward <marshall.ward@anu.edu.au>
+"""
 
-# Booting python takes ~0.1 seconds, subtract it from any qstat comparisons
-# `qstat > /dev/null` is ~0.5-2 seconds
-# Seems about the same for individual users (`qstat -u xxx999`)
-# `qstat -ft > /dev/null` takes ~2-5 seconds (usually)
-# `qstat -Qf` is usually 0.1-1 seconds
-# qstat itself can lag (sometimes more than 8sec)
-# nqstat is about 4-8 seconds (probably waiting on qstat -ft)
-
-# Performance improvement is only possible if we don't `qstat -ft`
-# Python isn't the problem
-
-# NOTE: Parsing qstat output is stupid, we need access to PBS libraries
 
 import argparse
 from collections import defaultdict
 import os
 import shlex
 import subprocess
-
-default_queues = ['express', 'normal', 'copyq']
+import sys
 
 #---
 def pbs_env_init():
 
     # Initialise against PBS_CONF_FILE
-    # TODO: Resolve missing file case
+    if sys.platform == 'win32':
+        pbs_conf_fpath = 'C:\Program Files\PBS Pro\pbs.conf'
+    else:
+        pbs_conf_fpath = '/etc/pbs.conf'
+    os.environ['PBS_CONF_FILE'] = pbs_conf_fpath
 
-    pbs_conf_fpath = '/etc/pbs.conf'
-    with open(pbs_conf_fpath) as pbs_conf:
-        for line in pbs_conf:
-            try:
-                key, value = line.split('=')
-                os.environ[key] = value.rstrip()
-            except ValueError:
-                pass
+    try:
+        with open(pbs_conf_fpath) as pbs_conf:
+            for line in pbs_conf:
+                try:
+                    key, value = line.split('=')
+                    os.environ[key] = value.rstrip()
+                except ValueError:
+                    pass
+    except IOError as ec:
+        print('Unable to find PBS_CONF_FILE ... ' + pbs_conf_fpath)
+        sys.exit(1)
 
 
 #---
@@ -57,7 +52,7 @@ def sizeof_h(size):
     if type(size) == str:
         # TODO: This is retarded, is there a better way?
         num =  int(''.join([s for s in size if s.isdigit()]))
-        suffix = ''.join([s for s in size if not s.isdigit()]) 
+        suffix = ''.join([s for s in size if not s.isdigit()])
 
         if suffix:
             num *=nbytes[suffix]
@@ -77,78 +72,40 @@ def sizeof_h(size):
 
 
 #---
-def get_qstat_info():
-    # TODO: FFS, parsing the entire contents of `qstat -ft`??
+def get_qstat_info(qflag, header, projects=None, users=None):
 
     qstat = os.path.join(os.environ['PBS_EXEC'], 'bin', 'qstat')
-    cmd = '{} -ft'.format(qstat)
+    cmd = '{} {}'.format(qstat, qflag)
 
     cmd = shlex.split(cmd)
     output = subprocess.check_output(cmd)
 
-    jentries = (j for j in output.split('Job Id: ') if j)
-    jattribs = ((k.split('.')[0], v.replace('\n\t', '').split('\n'))
-                for k, v in (j.split('\n', 1) for j in jentries))
+    entries = (e for e in output.split('{}: '.format(header)) if e)
 
-    job_status = {k: dict((kk.strip(), vv.strip())
+    # Immediately remove any non-project entries
+    if projects or users:
+        entries = (e for e in entries
+                   if any('project = {}'.format(p) in e for p in projects)
+                   or any('Job_Owner = {}'.format(u) in e for u in users))
+
+    attribs = ((k.split('.')[0], v.replace('\n\t', '').split('\n'))
+                for k, v in (e.split('\n', 1) for e in entries))
+
+    status = {k: dict((kk.strip(), vv.strip())
                         for kk, vv in (att.split('=', 1) for att in v if att))
-                        for k, v in jattribs}
+                        for k, v in attribs}
 
-    # Clean up the results
-    for j in job_status:
-
-        # Trim owner name
-        username = job_status[j]['Job_Owner'].split('@')[0]
-        job_status[j]['Job_Owner'] = username
-
-        for key, value in job_status[j].iteritems():
-            if value.isdigit():
-                job_status[j][key] = int(value)
-
-    return job_status
+    return status
 
 
 #---
-def get_queue_info():
-    # TODO: Very similar to get_qstat_info; combine them?
-
-    qstat_cmd = os.path.join(os.environ['PBS_EXEC'], 'bin', 'qstat')
-    cmd = '{} -Qf'.format(qstat_cmd)
-
-    cmd = shlex.split(cmd)
-    output = subprocess.check_output(cmd)
-
-    # Generate the list of queues
-    qentries = (q for q in output.split('Queue: ') if q)
-
-    # Generate the queue-attribute pairs per queue
-    qattribs = ((k, v.replace('\n\t','').split('\n')) for k, v in
-                                        (q.split('\n', 1) for q in qentries))
-
-    # Generate the attribute dictionary per queue
-    queue_status = {k: dict((kk.strip(), vv.strip())
-                        for kk, vv in (att.split('=', 1) for att in v if att))
-                    for k, v in qattribs}
-
-    # Clean up some of the results
-    for q in queue_status:
-        for key, value in queue_status[q].iteritems():
-
-            if value.isdigit():
-                queue_status[q][key] = int(value)
-            elif value.lower() == 'true':
-                queue_status[q][key] = True
-            elif value.lower() == 'false':
-                queue_status[q][key] = False
-
-    return queue_status
-
-
-#---
-def display_jobs(queues, jobs):
+def display_jobs(queues, jobs, show_priority=False):
 
     headers = ['Job', '', 'User', 'Project', '', '%CPU', 'WallTime',
                 'Time Lim', 'vmem', 'mem', 'memlim', 'cpus']
+
+    if show_priority:
+        headers.append('Priority')
 
     q_jobinfo = defaultdict(list)
     for qname, qstat in queues.iteritems():
@@ -159,36 +116,24 @@ def display_jobs(queues, jobs):
         qjobs = {j: jobs[j] for j in jobs if jobs[j]['queue'] == qname}
 
         for j in qjobs:
-            # Job data formatting
-            # TODO: Put in get_qstat_info?
-
-            try:
-                av_cpu_util = int(wt_secs(jobs[j]['resources_used.cput']) /
-                                (wt_secs(jobs[j]['resources_used.walltime'])
-                                 * jobs[j]['resources_used.ncpus']) * 100)
-            except KeyError:
-                av_cpu_util = 0
-
-            walltime_used = jobs[j].get('resources_used.walltime', '')
-            vmem_used = jobs[j].get('resources_used.vmem', 0)
-            mem_used = jobs[j].get('resources_used.mem', 0)
-            mem_limit = jobs[j].get('Resource_List.mem', 0)
-
             # TODO: Make a columns dict and iterate
             jstate = [j,
                       jobs[j]['job_state'],
                       jobs[j]['Job_Owner'],
                       jobs[j]['project'],
                       jobs[j]['Job_Name'][:8],
-                      av_cpu_util,
-                      walltime_used,
+                      jobs[j]['av_cpu_util'],
+                      jobs[j]['resources_used.walltime'],
                       jobs[j]['Resource_List.walltime'],
-                      sizeof_h(vmem_used),
-                      sizeof_h(mem_used),
-                      sizeof_h(mem_limit),
+                      jobs[j]['resources_used.vmem'],
+                      jobs[j]['resources_used.mem'],
+                      jobs[j]['Resource_List.mem'],
                       jobs[j]['Resource_List.ncpus']
                      ]
-            
+
+            if show_priority:
+                jstate.append(jobs[j]['Resource_List.jobprio'])
+
             q_jobinfo[qname].append(jstate)
 
     # Formatting
@@ -203,22 +148,26 @@ def display_jobs(queues, jobs):
         col_widths = [max(c1, c2) for c1, c2 in zip(j_colwidths, col_widths)]
 
     # Now display the output
-    log_format = ' '.join('%%%ds' % width for width in col_widths)
-    print(log_format % tuple(headers))
+    log_format = ' '.join('{{:>{}}}'.format(w) for w in col_widths)
     print('')
-    
+    print(log_format.format(*headers))
+
     for qname, j_info in q_jobinfo.iteritems():
 
-        qheader = '{} {} '.format(qname, status)
-        print(qheader + '=' * max(80 - len(qheader), 0))
-
-        log_format = ' '.join('%%%ds' % width for width in col_widths)
-
-        for j in sorted(j_info, key=lambda x: ord(x[1]), reverse=True):
-            print log_format % tuple(j)
-
-        print(queue_summary(qname, qjobs))
         print('')
+
+        qheader = '{} {} '.format(qname, status)
+        hlen = sum(col_widths) + len(headers)
+        print(qheader + '=' * max(hlen - len(qheader), 0))
+
+        log_format = ' '.join('{{:>{}}}'.format(w) for w in col_widths)
+
+        for j in sorted(j_info, key=lambda x: (x[3], -ord(x[1]))):
+            print(log_format.format(*j))
+
+        qjobs = {j: jobs[j] for j in jobs if jobs[j]['queue'] == qname}
+        print('')
+        print(queue_summary(qname, qjobs))
 
 
 #---
@@ -247,6 +196,7 @@ def queue_summary(queue, jobs):
 
 #---
 def nqstat(projects, users, queues, show_all, show_priority):
+    # TODO: show_all is not implemented
 
     # Default input
     if not projects:
@@ -261,19 +211,67 @@ def nqstat(projects, users, queues, show_all, show_priority):
         except KeyError:
             pass
 
-    if not queues:
-        queues = default_queues
+    # Ignore all this if `show_all` is enabled
+    if show_all:
+        projects, users = None, None
 
     # Fetch qstat data
-    queues = get_queue_info()
-    jobs = get_qstat_info()
+    qdata = get_qstat_info('-Qf', 'Queue')
 
-    # TODO: Do this during generation of jobs
-    jobs = {j: jobs[j] for j in jobs if jobs[j]['project'] in projects
-                                     or jobs[j]['Job_Owner'] in users}
+    # Filter queues
+    if queues:
+        qdata = {q: qdata[q] for q in qdata if q in queues}
+
+    for q in qdata:
+        for key, value in qdata[q].iteritems():
+
+            if value.isdigit():
+                qdata[q][key] = int(value)
+            elif value.lower() == 'true':
+                qdata[q][key] = True
+            elif value.lower() == 'false':
+                qdata[q][key] = False
+
+    # Fetch job data
+    jobs = get_qstat_info('-ft', 'Job Id', projects, users)
+
+    for j in jobs:
+
+        # Convert digit strings to integers
+        # TODO: This is too brutal; need a shortlist
+        for key, value in jobs[j].iteritems():
+            if value.isdigit():
+                jobs[j][key] = int(value)
+
+        # "Fix" the jobtitles
+        jobs[j]['Job_Name'] = str(jobs[j]['Job_Name'])
+
+        # Trim owner name
+        username = jobs[j]['Job_Owner'].split('@')[0]
+        jobs[j]['Job_Owner'] = username
+
+        # Pretty-print memory entries
+        att_walltime = 'resources_used.walltime'
+        jobs[j][att_walltime] = jobs[j].get(att_walltime, '')
+
+        mem_attribs = ('resources_used.vmem',
+                       'resources_used.mem',
+                       'Resource_List.mem')
+
+        for attrib in mem_attribs:
+            jobs[j][attrib] = sizeof_h(jobs[j].get(attrib, 0))
+
+        # Calculate effective CPU usage
+        try:
+            av_cpu_util = int(wt_secs(jobs[j]['resources_used.cput']) /
+                            (wt_secs(jobs[j]['resources_used.walltime'])
+                             * jobs[j]['resources_used.ncpus']) * 100)
+        except:
+            av_cpu_util = 0
+        jobs[j]['av_cpu_util'] = av_cpu_util
 
     # Display processed results
-    display_jobs(queues, jobs)
+    display_jobs(qdata, jobs, show_priority)
 
 
 def nqstat_parse():
