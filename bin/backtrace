@@ -1,0 +1,134 @@
+#!/usr/bin/env python
+
+# This is a very rough script to diagnose hanging MPI jobs
+# It needs more work before ready for public use
+# Contact: Marshall Ward <marshall.ward@gmail.com>
+
+from __future__ import print_function
+
+import os
+import shlex
+import subprocess
+import sys
+import time
+
+def get_nodes(jobid):
+
+    # Get job info
+    cmd = 'qstat -f {}'.format(jobid)
+    cmd = shlex.split(cmd)
+
+    # Parse job attributes
+    jstat = subprocess.check_output(cmd)
+
+    entries = (e.strip().split('=', 1)
+                for e in jstat.replace('\n\t', '').split('\n')
+                if e and not e.startswith('Job Id:'))
+
+    attrs = {e[0].strip(): e[1].strip() for e in entries}
+
+    # Get node lists
+    exec_host = attrs['exec_host']
+    nodes = [n.split('/')[0] for n in exec_host.split('+')]
+
+    return nodes
+
+
+def get_pids(nodes):
+
+    # Get PIDs for each node
+    pids = {}
+    ps_log = open('ps.log', 'w')
+    for n in nodes:
+        cmd = 'ssh {} ps u --ppid 2 -p 2 --deselect'.format(n)
+        print('-----', file=ps_log)
+        print(cmd, file=ps_log)
+        
+        cmd = shlex.split(cmd)
+        psout = subprocess.check_output(cmd)
+
+        print(psout, file=ps_log)
+
+        procs = [p for p in psout.split('\n') if 'mpirun' in p or 'orted' in p]
+        pid = procs[0].split()[1]
+        
+        pids[n] = pid
+
+    ps_log.close()
+    
+    return pids
+
+
+def backtrace(pids):
+
+    gdb_cmds = os.path.join(os.getcwd(), 'gdbcmd')
+
+    backtrace_log = open('bt.log', 'w')
+    for n, p in pids.iteritems():
+
+        cmd = 'ssh {} gdb -batch -x {} -p {}'.format(n, gdb_cmds, p)
+        print(cmd, file=backtrace_log)
+        cmd = shlex.split(cmd)
+        gdb_out = subprocess.check_output(cmd)
+        print(gdb_out, file=backtrace_log)
+
+    backtrace_log.close()
+
+
+def lsof(pids):
+
+    sys_log = open('sys.log', 'w')
+
+    # First get the list of open files
+    fds = {}
+    for n, p in pids.iteritems():
+        print('----', file=sys_log)
+        cmd = 'ssh {} strace -q -s 1000 -p {}'.format(n, p)
+        print(cmd, file=sys_log)
+        cmd = shlex.split(cmd)
+        strace_proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+        # Wait N seconds
+        # TODO: Sleep is dumb; Check output and terminate once it looks OK
+        time.sleep(2.2)
+        strace_proc.terminate()
+
+        # Skip restarting process message
+        tmp = strace_proc.stderr.next()
+        polls = strace_proc.stderr.next()
+
+        print(polls, file=sys_log)
+
+        # Parse fds (ugly!!!)
+        fds[n] = [int(s.split(',')[0][3:]) for s in polls.split('{')[1:]]
+
+        strace_proc.stderr.close()
+
+    sys_log.close()
+
+    lsof_log = open('lsof.log', 'w')
+    for n, p in pids.iteritems():
+
+        print('-----', file=lsof_log)
+        cmd = 'ssh {} /usr/sbin/lsof -p {}'.format(n, p)
+        print(cmd, file=lsof_log)
+        cmd = shlex.split(cmd)
+        lsof_out = subprocess.check_output(cmd)
+
+        # Ugly!!!
+        lsof_mpi = [line for line in lsof_out.split('\n')
+                    if line and line.split()[3][:-1].isdigit()
+                    and int(line.split()[3][:-1]) in fds[n]]
+        for line in lsof_mpi:
+            print(line, file=lsof_log)
+
+    lsof_log.close()
+
+
+if __name__ == '__main__':
+
+    jobid = sys.argv[1]
+    
+    nodes = get_nodes(jobid)
+    pids = get_pids(nodes)
+    backtrace(pids)
+    lsof(pids)
