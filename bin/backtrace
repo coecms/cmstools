@@ -83,7 +83,7 @@ def lsof(pids):
     fds = {}
     for n, p in pids.iteritems():
         print('----', file=sys_log)
-        cmd = 'ssh {} strace -q -s 1000 -p {}'.format(n, p)
+        cmd = 'ssh {} strace -f -q -s 2000 -p {}'.format(n, p)
         print(cmd, file=sys_log)
         cmd = shlex.split(cmd)
         strace_proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
@@ -129,6 +129,8 @@ if __name__ == '__main__':
     jobid = sys.argv[1]
     
     nodes = get_nodes(jobid)
+
     pids = get_pids(nodes)
+
     backtrace(pids)
     lsof(pids)

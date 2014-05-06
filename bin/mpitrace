@@ -1,0 +1,225 @@
+#!/usr/bin/env python
+
+# This is a very rough script to diagnose hanging MPI jobs
+# It needs more work before ready for public use
+# Contact: Marshall Ward <marshall.ward@gmail.com>
+
+from __future__ import print_function
+
+import argparse
+import os
+import resource
+import shlex
+import subprocess
+import sys
+import time
+
+def get_nodes(jobid):
+    """Return a list of node hostnames for a given PBS job ID."""
+
+    # Get job info
+    cmd = 'qstat -f {}'.format(jobid)
+    cmd = shlex.split(cmd)
+
+    # Parse job attributes
+    job_status = subprocess.check_output(cmd)
+
+    entries = (e.strip().split('=', 1)
+                for e in job_status.replace('\n\t', '').split('\n')
+                if e and not e.startswith('Job Id:'))
+
+    attrs = {e[0].strip(): e[1].strip() for e in entries}
+
+    # Get node lists
+    exec_host = attrs['exec_host']
+    nodes = [n.split('/')[0] for n in exec_host.split('+')]
+
+    return nodes
+
+
+def get_pids(nodes):
+    """Return dicts of the MPI process IDs and executable process IDs for each
+       node."""
+
+    node_procs = []
+    node_pipes = {}
+
+    fnull = open(os.devnull, 'w')
+
+    for n in nodes:
+
+        # Create input and ouput pipes per process, return their fd's
+        node_pipes[n] = os.pipe()
+
+        #cmd = 'ssh {} ps u --ppid 2 -p 2 --deselect'.format(n)
+        cmd = 'ssh {} ps u -e'.format(n)
+        proc = subprocess.Popen(shlex.split(cmd), stdout=node_pipes[n][1],
+                                stderr=fnull)
+        node_procs.append(proc)
+
+        # Close the output end of the pipe
+        os.close(node_pipes[n][1])
+
+    fnull.close()
+
+    # Wait for pipes to gather the proc info
+    for proc in node_procs:
+        proc.wait()
+
+    # Parse and gather the MPI process info
+    mpi_pids = {}
+    prog_pids = {}
+    for n in nodes:
+
+        f_input = os.fdopen(node_pipes[n][0], 'r')
+        ps_out = f_input.readlines()
+
+        mpi_pids[n] = [line.split()[1] for line in ps_out
+                       if 'mpirun' in line or 'orte' in line]
+
+        # TODO: Get the executable name from the mpirun process
+        prog_pids[n] = [line.split()[1] for line in ps_out
+                        if 'mom51' in line]
+
+    return mpi_pids, prog_pids
+
+
+def backtrace(pids, logfile='bt.log'):
+    """Gather backtraces for the specified processes across each node."""
+
+    resource.setrlimit(resource.RLIMIT_NOFILE, (4096, 4096))
+
+    # Create a backtrace gdb file
+    gdbcmd_path = os.path.join(os.getcwd(), 'gdbcmd')
+    if not os.path.isfile(gdbcmd_path):
+        gdbcmd = open(gdbcmd_path, 'w')
+        gdbcmd.write('backtrace\n')
+        gdbcmd.close()
+        new_gdbcmd_file = True
+    else:
+        new_gdbcmd_file = False
+
+    # Call gdb across the nodes
+    bt_procs = {}
+    bt_pipes = {}
+
+    fnull = open(os.devnull, 'w')
+
+    # Parse the backtrace output
+    backtrace_log = open(logfile, 'w')
+
+    # TODO: buffer this to limit the number of open files
+    pnodes = pids.keys()
+    buffsize = 20
+
+    nodebuffs = [pnodes[i:i+buffsize] for i in range(0, len(pnodes), buffsize)]
+
+    for nodes in nodebuffs:
+        for n in nodes:
+            bt_procs[n] = []
+            bt_pipes[n] = {}
+
+            for p in pids[n]:
+
+                bt_pipes[n][p] = os.pipe()
+
+                cmd = 'ssh {} gdb -batch -x {} -p {}'.format(n, gdbcmd_path, p)
+                proc = subprocess.Popen(shlex.split(cmd), stdout=bt_pipes[n][p][1],
+                                        stderr=fnull)
+
+                bt_procs[n].append(proc)
+
+                os.close(bt_pipes[n][p][1])
+        
+        # Block until calls are done
+        for n in nodes:
+            for proc in bt_procs[n]:
+                proc.wait()
+
+        # Output content to log
+        for n in nodes:
+            print('='*79, file=backtrace_log)
+            print('node {}'.format(n), file=backtrace_log)
+
+            for p in bt_pipes[n]:
+                f_input = os.fdopen(bt_pipes[n][p][0])
+
+                print('-'*79, file=backtrace_log)
+                print('proc {}'.format(p), file=backtrace_log)
+                for line in f_input:
+                    print(line.strip(), file=backtrace_log)
+
+                f_input.close()
+
+    fnull.close()
+    backtrace_log.close()
+
+    if new_gdbcmd_file:
+        os.remove(gdbcmd_path)
+    
+  
+def lsof(pids):
+
+    sys_log = open('sys.log', 'w')
+
+    # First get the list of open files
+    fds = {}
+    for n, node_pids in pids.iteritems():
+        print('='*79, file=sys_log)
+        print('node {}'.format(n), file=sys_log)
+        for p in nod_pids:
+            print('-'*79, file=sys_log)
+            cmd = 'ssh {} strace -f -q -s 2000 -p {}'.format(n, p)
+            print(cmd, file=sys_log)
+            cmd = shlex.split(cmd)
+            strace_proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+            # Wait N seconds
+            # TODO: Sleep is dumb; Check output and terminate once it looks OK
+            time.sleep(2.2)
+            strace_proc.terminate()
+
+            # Skip restarting process message
+            tmp = strace_proc.stderr.next()
+            polls = strace_proc.stderr.next()
+
+            print(polls, file=sys_log)
+
+            # Parse fds (ugly!!!)
+            fds[n] = [int(s.split(',')[0][3:]) for s in polls.split('{')[1:]]
+
+            strace_proc.stderr.close()
+
+    sys_log.close()
+
+    lsof_log = open('lsof.log', 'w')
+    for n, p in pids.iteritems():
+
+        print('-----', file=lsof_log)
+        cmd = 'ssh {} /usr/sbin/lsof -p {}'.format(n, p)
+        print(cmd, file=lsof_log)
+        cmd = shlex.split(cmd)
+        lsof_out = subprocess.check_output(cmd)
+
+        # Ugly!!!
+        lsof_mpi = [line for line in lsof_out.split('\n')
+                    if line and line.split()[3][:-1].isdigit()
+                    and int(line.split()[3][:-1]) in fds[n]]
+        for line in lsof_mpi:
+            print(line, file=lsof_log)
+
+    lsof_log.close()
+
+
+if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('jobid', type=int, help='PBS job ID')
+    args = parser.parse_args()
+
+    nodes = get_nodes(args.jobid)
+    mpi_pids, prog_pids = get_pids(nodes)
+
+    backtrace(mpi_pids, logfile='bt_mpi.log')
+    backtrace(prog_pids, logfile='bt_mom.log')
+
+    #lsof(pids)
