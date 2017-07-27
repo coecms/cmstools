@@ -99,9 +99,9 @@ def get_qstat_info(qflag, header, projects=None, users=None):
 
 
 #---
-def display_jobs(queues, jobs, jobwidth, show_priority=False):
+def display_jobs(queues, jobs, jobnamewidth, show_priority=False):
 
-    headers = ['Job', '', 'User', 'Project', ' ' * jobwidth, '%CPU', 'WallTime',
+    headers = ['Job', '', 'User', 'Project', ' ' * jobnamewidth, '%CPU', 'WallTime',
                 'Time Lim', 'vmem', 'mem', 'memlim', 'cpus']
 
     if show_priority:
@@ -121,7 +121,7 @@ def display_jobs(queues, jobs, jobwidth, show_priority=False):
                       jobs[j]['job_state'],
                       jobs[j]['Job_Owner'],
                       jobs[j]['project'],
-                      jobs[j]['Job_Name'][:min(jobwidth,len(jobs[j]['Job_Name']))],
+                      jobs[j]['Job_Name'][:min(jobnamewidth,len(jobs[j]['Job_Name']))],
                       jobs[j]['av_cpu_util'],
                       jobs[j]['resources_used.walltime'],
                       jobs[j]['Resource_List.walltime'],
@@ -195,7 +195,7 @@ def queue_summary(queue, jobs):
 
 
 #---
-def nqstat(projects, users, queues, show_all, show_priority, jobwidth):
+def nqstat(projects, users, queues, show_all, show_priority, jobnamewidth):
     # TODO: show_all is not implemented
 
     # Default input
@@ -271,7 +271,7 @@ def nqstat(projects, users, queues, show_all, show_priority, jobwidth):
         jobs[j]['av_cpu_util'] = av_cpu_util
 
     # Display processed results
-    display_jobs(qdata, jobs, jobwidth, show_priority)
+    display_jobs(qdata, jobs, jobnamewidth, show_priority)
 
 
 def nqstat_parse():
@@ -279,10 +279,9 @@ def nqstat_parse():
 
     parser.add_argument('-P', '--project')
     parser.add_argument('-u', '--user')
-    parser.add_argument('-w', '--jobwidth',
+    parser.add_argument('-w', '--jobnamewidth',
                         default=8,
-                        type=int,
-                        choices=xrange(8, 50))
+                        type=int)
     parser.add_argument('-a', '--all',
                         action='store_true',
                         dest='show_all')
@@ -298,7 +297,7 @@ def nqstat_parse():
     projects = args.project.split(',') if args.project else None
     users = args.user.split(',') if args.user else None
 
-    return projects, users, args.queues, args.show_all, args.show_priority, args.jobwidth
+    return projects, users, args.queues, args.show_all, args.show_priority, args.jobnamewidth
 
 
 if __name__ == '__main__':
