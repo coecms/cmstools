@@ -110,8 +110,8 @@ def display_jobs(queues, jobs, jobnamewidth, show_priority=False):
     q_jobinfo = defaultdict(list)
     for qname, qstat in queues.iteritems():
 
-        status = (('open' if qstat['enabled'] else 'closed')
-                + ('&run' if qstat['started'] else ''))
+        status = (('open' if qstat.get('enabled') else 'closed')
+                + ('&run' if qstat.get('started') else ''))
 
         qjobs = {j: jobs[j] for j in jobs if jobs[j]['queue'] == qname}
 
