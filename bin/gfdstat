@@ -48,26 +48,29 @@ def sizeof_h(size):
     units = ['b', 'kb', 'mb', 'gb', 'tb', 'pb', 'eb', 'zb', 'yb']
     nbytes = {u: 2**(10*i) for i, u  in enumerate(units)}
 
-    # Convert to bytes
-    if type(size) == str:
-        # TODO: This is retarded, is there a better way?
+    if type(size) == int:
+        num = size
+    else:
+        try:
+            # Need this step to convert from unicode for python3
+            # Could check for unicode type instead, but this is easy
+            size=str(size)
+        except:
+            print('nqstat: error: Unknown memory size: {}'.format(size))
+            sys.exit(1)
+
+        # Convert to bytes
+        # TODO: This is stupid, is there a better way?
         num =  int(''.join([s for s in size if s.isdigit()]))
         suffix = ''.join([s for s in size if not s.isdigit()])
 
         if suffix:
             num *=nbytes[suffix]
 
-    elif type(size) == int:
-        num = size
-
-    else:
-        print('nqstat: error: Unknown memory size')
-        sys.exit(1)
-
     # ... and back again
     for u in ['', 'kib', 'Mib', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB']:
         if num < 2**10:
-            return '{:3}{}'.format(num, u)
+            return '{:3.0f}{}'.format(num, u)
         num /= 2**10
 
 
@@ -78,7 +81,7 @@ def get_qstat_info(qflag, header, projects=None, users=None):
     cmd = '{} {}'.format(qstat, qflag)
 
     cmd = shlex.split(cmd)
-    output = subprocess.check_output(cmd)
+    output = subprocess.check_output(cmd).decode()
 
     entries = (e for e in output.split('{}: '.format(header)) if e)
 
@@ -108,7 +111,7 @@ def display_jobs(queues, jobs, jobnamewidth, show_priority=False):
         headers.append('Priority')
 
     q_jobinfo = defaultdict(list)
-    for qname, qstat in queues.iteritems():
+    for qname, qstat in queues.items():
 
         status = (('open' if qstat.get('enabled') else 'closed')
                 + ('&run' if qstat.get('started') else ''))
@@ -139,7 +142,7 @@ def display_jobs(queues, jobs, jobnamewidth, show_priority=False):
     # Formatting
     col_widths = [len(h) for h in headers]
 
-    for qname, j_info in q_jobinfo.iteritems():
+    for qname, j_info in q_jobinfo.items():
 
         cols = zip(*j_info)
         j_colwidths = [max(len(str(v)) for v in col) for col in cols]
@@ -152,7 +155,7 @@ def display_jobs(queues, jobs, jobnamewidth, show_priority=False):
     print('')
     print(log_format.format(*headers))
 
-    for qname, j_info in q_jobinfo.iteritems():
+    for qname, j_info in q_jobinfo.items():
 
         print('')
 
@@ -223,7 +226,7 @@ def nqstat(projects, users, queues, show_all, show_priority, jobnamewidth):
         qdata = {q: qdata[q] for q in qdata if q in queues}
 
     for q in qdata:
-        for key, value in qdata[q].iteritems():
+        for key, value in qdata[q].items():
 
             if value.isdigit():
                 qdata[q][key] = int(value)
@@ -239,7 +242,7 @@ def nqstat(projects, users, queues, show_all, show_priority, jobnamewidth):
 
         # Convert digit strings to integers
         # TODO: This is too brutal; need a shortlist
-        for key, value in jobs[j].iteritems():
+        for key, value in jobs[j].items():
             if value.isdigit():
                 jobs[j][key] = int(value)
 
