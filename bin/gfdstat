@@ -81,7 +81,7 @@ def get_qstat_info(qflag, header, projects=None, users=None):
     cmd = '{} {}'.format(qstat, qflag)
 
     cmd = shlex.split(cmd)
-    output = subprocess.check_output(cmd).decode()
+    output = subprocess.check_output(cmd).decode(errors='replace')
 
     entries = (e for e in output.split('{}: '.format(header)) if e)
 
